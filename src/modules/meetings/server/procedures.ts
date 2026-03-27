@@ -13,6 +13,10 @@ import { DEFAULT_PAGE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_PAGE_SIZE } from "@
 import { MeetingStatus, StreamTranscriptItem } from "../types";
 import { meetingsInsertSchema, meetingsUpdateSchema } from "../schemas";
 import { streamChat } from "@/lib/stream-chat";
+import { inngest } from "@/inngest/client";
+
+
+
 
 export const meetingsRouter = createTRPCRouter({
   generateChatToken: protectedProcedure.mutation(async ({ ctx }) => {
@@ -113,6 +117,57 @@ export const meetingsRouter = createTRPCRouter({
       })
 
       return transcriptWithSpeakers;
+    }),
+  join: protectedProcedure
+    .input(z.object({ id: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const [updatedMeeting] = await db
+        .update(meetings)
+        .set({
+          status: "active",
+          startedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(meetings.id, input.id),
+            eq(meetings.userId, ctx.auth.user.id),
+            eq(meetings.status, "upcoming"),
+          )
+        )
+        .returning();
+
+      return updatedMeeting;
+    }),
+  complete: protectedProcedure
+    .input(z.object({ id: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const [updatedMeeting] = await db
+        .update(meetings)
+        .set({
+          status: "processing",
+          endedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(meetings.id, input.id),
+            eq(meetings.userId, ctx.auth.user.id),
+            eq(meetings.status, "active"),
+          )
+        )
+        .returning();
+
+      if (updatedMeeting) {
+        await inngest.send({
+          name: "meeting.completed",
+          data: {
+            meetingId: updatedMeeting.id,
+          },
+        });
+      }
+
+
+
+      return updatedMeeting;
     }),
   generateToken: protectedProcedure.mutation(async ({ ctx }) => {
     await streamVideo.upsertUsers([

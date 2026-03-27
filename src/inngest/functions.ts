@@ -5,6 +5,7 @@ import { createAgent, openai, TextMessage } from "@inngest/agent-kit";
 import { db } from "@/db";
 import { agents, meetings, user } from "@/db/schema";
 import { inngest } from "@/inngest/client";
+import { streamVideo } from "@/lib/stream-video";
 
 import { StreamTranscriptItem } from "@/modules/meetings/types";
 
@@ -39,11 +40,50 @@ Example:
 });
 
 export const meetingsProcessing = inngest.createFunction(
-  { id: "meetings/processing" },
-  { event: "meetings/processing" },
+  { id: "meeting-completed", name: "Meeting Completed Processing" },
+  { event: "meeting.completed" },
   async ({ event, step }) => {
-    const response = await step.run("fetch-transcript", async () => {
-      return fetch(event.data.transcriptUrl).then((res) => res.text());
+    const { meetingId } = event.data;
+
+    console.log(`[inngest] Starting processing for meeting: ${meetingId}`);
+
+    // Update status to processing
+    await step.run("update-status-processing", async () => {
+      await db
+        .update(meetings)
+        .set({ status: "processing" })
+        .where(eq(meetings.id, meetingId));
+    });
+
+    // Wait and fetch transcript from Stream if not already present in DB
+    const transcriptUrl = await step.run("fetch-transcript-url", async () => {
+      const [meeting] = await db
+        .select()
+        .from(meetings)
+        .where(eq(meetings.id, meetingId));
+
+      if (meeting?.transcriptUrl) return meeting.transcriptUrl;
+
+      // Try to fetch from Stream directly if webhook missed it
+      const call = streamVideo.video.call("default", meetingId);
+      const { transcriptions } = await call.listTranscriptions();
+      
+      if (transcriptions.length > 0) {
+        const url = transcriptions[0].url;
+        await db
+          .update(meetings)
+          .set({ transcriptUrl: url })
+          .where(eq(meetings.id, meetingId));
+        return url;
+      }
+      
+      throw new Error("Transcript not ready yet");
+    });
+
+    const response = await step.run("download-transcript", async () => {
+      const res = await fetch(transcriptUrl);
+      if (!res.ok) throw new Error(`Failed to download transcript: ${res.statusText}`);
+      return res.text();
     });
 
     const transcript = await step.run("parse-transcript", async () => {
@@ -51,69 +91,53 @@ export const meetingsProcessing = inngest.createFunction(
     });
 
     const transcriptWithSpeakers = await step.run("add-speakers", async () => {
-      const speakerIds = [
-        ...new Set(transcript.map((item) => item.speaker_id)),
-      ];
+      const speakerIds = [...new Set(transcript.map((item) => item.speaker_id))];
 
       const userSpeakers = await db
         .select()
         .from(user)
-        .where(inArray(user.id, speakerIds))
-        .then((users) =>
-          users.map((user) => ({
-            ...user,
-          }))
-        );
+        .where(inArray(user.id, speakerIds));
 
       const agentSpeakers = await db
         .select()
         .from(agents)
-        .where(inArray(agents.id, speakerIds))
-        .then((agents) =>
-          agents.map((agent) => ({
-            ...agent,
-          }))
-        );
+        .where(inArray(agents.id, speakerIds));
 
       const speakers = [...userSpeakers, ...agentSpeakers];
 
       return transcript.map((item) => {
-        const speaker = speakers.find(
-          (speaker) => speaker.id === item.speaker_id
-        );
-
-        if (!speaker) {
-          return {
-            ...item,
-            user: {
-              name: "Unknown",
-            },
-          };
-        }
-
+        const speaker = speakers.find((s) => s.id === item.speaker_id);
         return {
           ...item,
           user: {
-            name: speaker.name,
+            name: speaker?.name ?? "Unknown",
           },
         };
       });
     });
 
-    const { output } = await summarizer.run(
-      "Summarize the following transcript: " +
-        JSON.stringify(transcriptWithSpeakers)
-    );
+    const { output } = await step.run("generate-summary", async () => {
+      return summarizer.run(
+        "Summarize the following transcript: " +
+          JSON.stringify(transcriptWithSpeakers)
+      );
+    });
 
-    await step.run("save-summary", async () => {
+    const summaryText = (output[0] as TextMessage).content as string;
+
+    await step.run("save-results", async () => {
       await db
         .update(meetings)
         .set({
-          summary: (output[0] as TextMessage).content as string,
+          summary: summaryText,
           status: "completed",
+          endedAt: new Date(),
         })
-        .where(eq(meetings.id, event.data.meetingId))
-    })
-  },
-);
+        .where(eq(meetings.id, meetingId));
+      
+      console.log(`[inngest] Successfully processed meeting: ${meetingId}`);
+    });
 
+    return { success: true, meetingId };
+  }
+);

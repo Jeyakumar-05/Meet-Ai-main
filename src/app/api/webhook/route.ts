@@ -183,10 +183,9 @@ export async function POST(req: NextRequest) {
     }
 
     await inngest.send({
-      name: "meetings/processing",
+      name: "meeting.completed",
       data: {
         meetingId: updatedMeeting.id,
-        transcriptUrl: updatedMeeting.transcriptUrl,
       },
     });
   } else if (eventType === "call.recording_ready") {

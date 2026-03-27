@@ -1,4 +1,4 @@
 import { Inngest } from "inngest";
 
-// Create a client to send and receive events
-export const inngest = new Inngest({ id: "meet-ai-2" });
+// Client ID should be a single name for the application
+export const inngest = new Inngest({ id: "meet-ai" });
