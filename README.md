@@ -59,4 +59,3 @@ npm run start        # Start production server
 
 ---
 
-Created by [CodeWithAntonio](https://codewithantonio.com)
