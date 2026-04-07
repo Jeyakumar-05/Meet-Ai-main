@@ -37,14 +37,17 @@ export const CallUI = ({ meetingId, meetingName }: Props) => {
     }
   };
 
-  const handleLeave = async () => {
+  const handleLeave = async (transcript?: string) => {
     if (!call) return;
 
     try {
       console.log(`[CallUI] Ending meeting: ${meetingId}`);
       
       // Trigger Inngest processing and update status to "processing"
-      await completeMutation.mutateAsync({ id: meetingId });
+      await completeMutation.mutateAsync({ 
+        id: meetingId,
+        transcript,
+      });
       
       await call.endCall();
       setShow("ended");

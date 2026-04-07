@@ -58,7 +58,7 @@ declare global {
 // ─── Call Active Component ───────────────────────────────────────────────────
 
 interface Props {
-  onLeave: () => void;
+  onLeave: (transcript?: string) => void;
   meetingId: string;
   meetingName: string;
 }
@@ -296,7 +296,10 @@ export const CallActive = ({ onLeave, meetingId, meetingName }: Props) => {
     window.speechSynthesis.cancel();
     setIsListening(false);
     setIsSpeaking(false);
-    onLeave();
+    
+    // Pass the transcript (all messages) back to onLeave
+    const transcript = JSON.stringify(conversationHistoryRef.current);
+    onLeave(transcript);
   }, [onLeave]);
 
   // ─── Render ────────────────────────────────────────────────────────────────

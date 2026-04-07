@@ -1,3 +1,5 @@
+"use client";
+
 import { useState, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import type { Channel as StreamChannel } from "stream-chat";
@@ -26,7 +28,6 @@ interface ChatUIProps {
 
 export const ChatUI = ({
   meetingId,
-  meetingName,
   userId,
   userName,
   userImage,
@@ -55,7 +56,7 @@ export const ChatUI = ({
     });
 
     setChannel(channel);
-  }, [client, meetingId, meetingName, userId]);
+  }, [client, meetingId, userId]);
 
   if (!client) {
     return (

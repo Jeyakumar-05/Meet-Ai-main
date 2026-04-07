@@ -45,78 +45,42 @@ export const meetingsRouter = createTRPCRouter({
         });
       }
 
-      if (!existingMeeting.transcriptUrl) {
-        return [];
+      if (existingMeeting.transcript) {
+        try {
+          const messages = JSON.parse(existingMeeting.transcript);
+          return messages.map((msg: any, index: number) => ({
+            speaker_id: msg.role,
+            type: "text",
+            text: msg.content,
+            start_ts: index * 1000,
+            stop_ts: (index + 0.5) * 1000,
+            user: {
+              name: msg.role === "assistant" ? "AI Assistant" : ctx.auth.user.name,
+              image: generateAvatarUri({
+                seed: msg.role === "assistant" ? "AI Assistant" : ctx.auth.user.name,
+                variant: msg.role === "assistant" ? "botttsNeutral" : "initials"
+              })
+            }
+          }));
+        } catch (e) {
+          console.error("Failed to parse transcript JSON", e);
+        }
       }
 
-      const transcript = await fetch(existingMeeting.transcriptUrl)
-        .then((res) => res.text())
-        .then((text) => JSONL.parse<StreamTranscriptItem>(text))
-        .catch(() => {
-          return [];
-        });
-
-      const speakerIds = [
-        ...new Set(transcript.map((item) => item.speaker_id)),
-      ];
-
-      const userSpeakers = await db
-        .select()
-        .from(user)
-        .where(inArray(user.id, speakerIds))
-        .then((users) =>
-          users.map((user) => ({
-            ...user,
-            image:
-              user.image ??
-              generateAvatarUri({ seed: user.name, variant: "initials" }),
-          }))
-        );
-
-      const agentSpeakers = await db
-        .select()
-        .from(agents)
-        .where(inArray(agents.id, speakerIds))
-        .then((agents) =>
-          agents.map((agent) => ({
-            ...agent,
-            image: generateAvatarUri({
-              seed: agent.name,
-              variant: "botttsNeutral",
-            }),
-          }))
-        );
-
-      const speakers = [...userSpeakers, ...agentSpeakers];
-
-      const transcriptWithSpeakers = transcript.map((item) => {
-        const speaker = speakers.find(
-          (speaker) => speaker.id === item.speaker_id
-        );
-
-        if (!speaker) {
-          return {
-            ...item,
-            user: {
-              name: "Unknown",
-              image: generateAvatarUri({
-                seed: "Unknown",
-                variant: "initials",
-              }),
-            },
-          };
-        }
-
-        return {
-          ...item,
+      // Fallback for testing: Mock data if transcript is empty
+      return [
+        {
+          speaker_id: "assistant",
+          type: "text",
+          text: "Welcome! The meeting transcript will appear here. Sample: Hello, I am your AI assistant.",
+          start_ts: 0,
+          stop_ts: 500,
           user: {
-            name: speaker.name,
-            image: speaker.image,
-          },
-        };
-      })
-
-      return transcriptWithSpeakers;
+            name: "AI Assistant",
+            image: generateAvatarUri({ seed: "AI Assistant", variant: "botttsNeutral" })
+          }
+        }
+      ];
     }),
   join: protectedProcedure
     .input(z.object({ id: z.string() }))
@@ -139,13 +103,17 @@ export const meetingsRouter = createTRPCRouter({
       return updatedMeeting;
     }),
   complete: protectedProcedure
-    .input(z.object({ id: z.string() }))
+    .input(z.object({ 
+      id: z.string(),
+      transcript: z.string().optional()
+    }))
     .mutation(async ({ ctx, input }) => {
       const [updatedMeeting] = await db
         .update(meetings)
         .set({
           status: "processing",
           endedAt: new Date(),
+          transcript: input.transcript || null,
         })
         .where(
           and(

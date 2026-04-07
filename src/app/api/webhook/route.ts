@@ -3,8 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   MessageNewEvent,
   CallEndedEvent,
-  CallTranscriptionReadyEvent,
-  CallRecordingReadyEvent,
   CallSessionParticipantLeftEvent,
   CallSessionStartedEvent,
 } from "@stream-io/node-sdk";
@@ -101,14 +99,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
   }
 
-  let payload: unknown;
+  let payload: any;
   try {
-    payload = JSON.parse(body) as Record<string, unknown>;
+    payload = JSON.parse(body);
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const eventType = (payload as Record<string, unknown>)?.type;
+  const eventType = payload?.type;
 
   if (eventType === "call.session_started") {
     const event = payload as CallSessionStartedEvent;
@@ -118,7 +116,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing meetingId" }, { status: 400 });
     }
 
-    const [existingMeeting] = await db
+    await db
       .update(meetings)
       .set({
         status: "active",
@@ -132,18 +130,11 @@ export async function POST(req: NextRequest) {
           not(eq(meetings.status, "cancelled")),
           not(eq(meetings.status, "processing")),
         )
-      )
-      .returning();
+      );
 
-    if (!existingMeeting) {
-      return NextResponse.json({ error: "Meeting already active or not found" }, { status: 404 });
-    }
-
-    // AI agent now responds via browser SpeechRecognition + Groq API + TTS
-    // No need for Stream's connectOpenAi (Realtime API) anymore
   } else if (eventType === "call.session_participant_left") {
     const event = payload as CallSessionParticipantLeftEvent;
-    const meetingId = event.call_cid.split(":")[1]; // call_cid is formatted as "type:id"
+    const meetingId = event.call_cid.split(":")[1];
 
     if (!meetingId) {
       return NextResponse.json({ error: "Missing meetingId" }, { status: 400 });
@@ -151,6 +142,7 @@ export async function POST(req: NextRequest) {
 
     const call = streamVideo.video.call("default", meetingId);
     await call.end();
+
   } else if (eventType === "call.session_ended") {
     const event = payload as CallEndedEvent;
     const meetingId = event.call.custom?.meetingId;
@@ -166,50 +158,20 @@ export async function POST(req: NextRequest) {
         endedAt: new Date(),
       })
       .where(and(eq(meetings.id, meetingId), eq(meetings.status, "active")));
-  } else if (eventType === "call.transcription_ready") {
-    const event = payload as CallTranscriptionReadyEvent;
-    const meetingId = event.call_cid.split(":")[1]; // call_cid is formatted as "type:id"
-
-    const [updatedMeeting] = await db
-      .update(meetings)
-      .set({
-        transcriptUrl: event.call_transcription.url,
-      })
-      .where(eq(meetings.id, meetingId))
-      .returning();
-
-    if (!updatedMeeting) {
-      return NextResponse.json({ error: "Meeting not found" }, { status: 404 });
-    }
 
     await inngest.send({
       name: "meeting.completed",
-      data: {
-        meetingId: updatedMeeting.id,
-      },
+      data: { meetingId },
     });
-  } else if (eventType === "call.recording_ready") {
-    const event = payload as CallRecordingReadyEvent;
-    const meetingId = event.call_cid.split(":")[1]; // call_cid is formatted as "type:id"
 
-    await db
-      .update(meetings)
-      .set({
-        recordingUrl: event.call_recording.url,
-      })
-      .where(eq(meetings.id, meetingId));
   } else if (eventType === "message.new") {
     const event = payload as MessageNewEvent;
-
     const userId = event.user?.id;
     const channelId = event.channel_id;
     const text = event.message?.text;
 
     if (!userId || !channelId || !text) {
-      return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
     const [existingMeeting] = await db
@@ -230,79 +192,77 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
     }
 
+    // Only respond if the message is from a user (not the agent itself)
     if (userId !== existingAgent.id) {
+      const transcriptStr = existingMeeting.transcript
+        ? JSON.stringify(JSON.parse(existingMeeting.transcript))
+        : "No transcript available.";
+
       const instructions = `
       You are an AI assistant helping the user revisit a recently completed meeting.
-      Below is a summary of the meeting, generated from the transcript:
+      Below is a summary of the meeting:
       
       ${existingMeeting.summary}
+      
+      Here is the full conversation transcript for context:
+      ${transcriptStr}
       
       The following are your original instructions from the live meeting assistant. Please continue to follow these behavioral guidelines as you assist the user:
       
       ${existingAgent.instructions}
       
       The user may ask questions about the meeting, request clarifications, or ask for follow-up actions.
-      Always base your responses on the meeting summary above.
+      Always base your responses on the meeting summary and transcript above.
       
-      You also have access to the recent conversation history between you and the user. Use the context of previous messages to provide relevant, coherent, and helpful responses. If the user's question refers to something discussed earlier, make sure to take that into account and maintain continuity in the conversation.
+      You also have access to the recent conversation history between you and the user. Use the context of previous messages to provide relevant, coherent, and helpful responses.
       
-      If the summary does not contain enough information to answer a question, politely let the user know.
+      If the summary/transcript does not contain enough information to answer a question, politely let the user know.
       
-      Be concise, helpful, and focus on providing accurate information from the meeting and the ongoing conversation.
+      Be concise, helpful, and focus on providing accurate information from the meeting.
       `;
 
-      const channel = streamChat.channel("messaging", channelId);
-      await channel.watch();
-
-      const previousMessages: ChatMessage[] = channel.state.messages
-        .slice(-5)
-        .filter((msg) => msg.text && msg.text.trim() !== "")
-        .map((message) => ({
-          role: (message.user?.id === existingAgent.id
-            ? "assistant"
-            : "user") as "assistant" | "user",
-          content: message.text || "",
-        }));
-
       try {
+        const channel = streamChat.channel("messaging", channelId);
+        await channel.watch();
+
+        const previousMessages: ChatMessage[] = channel.state.messages
+          .slice(-5)
+          .filter((msg) => msg.text && msg.text.trim() !== "")
+          .map((message) => ({
+            role: (message.user?.id === existingAgent.id ? "assistant" : "user") as "assistant" | "user",
+            content: message.text || "",
+          }));
+
         const groqResponseText = await groqChatCompletion([
           { role: "system", content: instructions },
           ...previousMessages,
           { role: "user", content: text },
         ]);
 
-        if (!groqResponseText) {
-          return NextResponse.json(
-            { error: "No response from Groq" },
-            { status: 400 }
-          );
-        }
+        if (groqResponseText) {
+          const avatarUrl = generateAvatarUri({
+            seed: existingAgent.name,
+            variant: "botttsNeutral",
+          });
 
-        const avatarUrl = generateAvatarUri({
-          seed: existingAgent.name,
-          variant: "botttsNeutral",
-        });
-
-        streamChat.upsertUser({
-          id: existingAgent.id,
-          name: existingAgent.name,
-          image: avatarUrl,
-        });
-
-        channel.sendMessage({
-          text: groqResponseText,
-          user: {
+          await streamChat.upsertUser({
             id: existingAgent.id,
             name: existingAgent.name,
             image: avatarUrl,
-          },
-        });
+          });
+
+          await channel.sendMessage({
+            text: groqResponseText,
+            user: {
+              id: existingAgent.id,
+              name: existingAgent.name,
+              image: avatarUrl,
+            },
+          });
+        }
       } catch (error) {
         console.error("[webhook] Groq chat completion failed:", error);
-        return NextResponse.json(
-          { error: "AI response generation failed" },
-          { status: 500 }
-        );
+        return NextResponse.json({ error: "AI response generation failed" }, { status: 500 });
       }
     }
   }
