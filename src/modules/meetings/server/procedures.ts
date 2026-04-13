@@ -20,7 +20,8 @@ import { inngest } from "@/inngest/client";
 
 export const meetingsRouter = createTRPCRouter({
   generateChatToken: protectedProcedure.mutation(async ({ ctx }) => {
-    const token = streamChat.createToken(ctx.auth.user.id);
+    const issuedAt = Math.floor(Date.now() / 1000) - 60;
+    const token = streamChat.createToken(ctx.auth.user.id, undefined, issuedAt);
     await streamChat.upsertUser({
       id: ctx.auth.user.id,
       role: "admin",
@@ -155,7 +156,7 @@ export const meetingsRouter = createTRPCRouter({
     const token = streamVideo.generateUserToken({
       user_id: ctx.auth.user.id,
       exp: expirationTime,
-      validity_in_seconds: issuedAt,
+      iat: issuedAt,
     });
 
     return token;

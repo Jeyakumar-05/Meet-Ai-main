@@ -17,16 +17,22 @@ export const CallUI = ({ meetingId, meetingName }: Props) => {
   const trpc = useTRPC();
   const call = useCall();
   const [show, setShow] = useState<"lobby" | "call" | "ended">("lobby");
+  const [isJoining, setIsJoining] = useState(false);
 
   const joinMutation = useMutation(trpc.meetings.join.mutationOptions());
   const completeMutation = useMutation(trpc.meetings.complete.mutationOptions());
 
   const handleJoin = async () => {
-    if (!call) return;
+    if (!call || isJoining) return;
 
     try {
-      console.log(`[CallUI] Joining meeting: ${meetingId}`);
-      await call.join();
+      setIsJoining(true);
+      
+      // If the call is already joined or joining, skip the call.join() step
+      if (call.state.callingState === "idle") {
+        console.log(`[CallUI] Joining meeting: ${meetingId}`);
+        await call.join();
+      }
       
       // Update meeting status to "active" in database
       await joinMutation.mutateAsync({ id: meetingId });
@@ -34,6 +40,8 @@ export const CallUI = ({ meetingId, meetingName }: Props) => {
       setShow("call");
     } catch (error) {
       console.error("[CallUI] Error joining meeting:", error);
+    } finally {
+      setIsJoining(false);
     }
   };
 
